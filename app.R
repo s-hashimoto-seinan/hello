@@ -323,7 +323,7 @@ server <- function(input, output, session){
     
     # ファイル名（ID未入力時の保険）
     pid <- if (nzchar(input$participant_id)) input$participant_id else "anon"
-    fname <- sprintf("%s_paired_comp_%s_%s.csv", ATTR_LABEL, pid, format(Sys.time(), "%Y%m%d-%H%M%S"))
+    fname <- sprintf("paired_comp_%s_%s.csv", pid, format(Sys.time(), "%Y%m%d-%H%M%S"))
     
     # 一時CSVを書き出し
     tmpfile <- tempfile(fileext = ".csv")

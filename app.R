@@ -264,7 +264,7 @@ server <- function(input, output, session){
     
     # ファイル名（ID未入力時の保険）
     pid <- if (nzchar(input$participant_id)) input$participant_id else "anon"
-    fname <- sprintf("paired_comp_%s_%s.csv", pid, format(Sys.time(), "%Y%m%d-%H%M%S"))
+    fname <- sprintf("%s_paired_comp_%s_%s.csv", ATTR_LABEL, pid, format(Sys.time(), "%Y%m%d-%H%M%S"))
     
     # 一時CSVを書き出し
     tmpfile <- tempfile(fileext = ".csv")
@@ -286,15 +286,16 @@ server <- function(input, output, session){
     
     showModal(modalDialog(
       title = "Complete sending",
-      sprintf("data was successfully sended：%s", fname),
+      sprintf("data was successfully sended. Prease close the window：%s", fname),
       easyClose = TRUE
     ))
     
-    # 1.5秒後にセッションを終了（Viewer/ブラウザ問わず有効）
+    # 5秒後にセッションを終了（Viewer/ブラウザ問わず有効）
     later::later(function(){
       session$close()    # または 
       shiny::stopApp()
-    }, 1.5)
+    }, 5)
+
   })
   
   # Restart button

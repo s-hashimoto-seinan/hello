@@ -49,8 +49,24 @@ ATTR_ID    <- "A1"
 ATTR_LABEL <- "Attractive"
 ATTR_INSTR <- paste0("Which do you find more ", ATTR_LABEL, ", the left or the right?")
 
+BREAK_BETWEEN_BLOCKS <- TRUE
+
+attrs_tbl <- tibble::tribble(
+  ~attr_id, ~label,       ~instruction,
+  "A1",     "Attractive",   "Which do you find more `Attractive', the left or the right?",
+  "A2",     "Mascular",      "Which do you find more `Muscular', the left or the right?",
+  "A3",     "Curious",    "Which do you find more `Curious', the left or the right?",
+  "A4",     "Smart",   "Which do you find more `Smart', the left or the right?",
+  "A5",     "Perseverance",      "Which do you find more `Perseverance', the left or the right?",
+  "A6",     "Courageous",    "Which do you find more `Courageous', the left or the right?",
+  "A7",     "Small",   "Which do you find more `Small', the left or the right?",
+  "A8",     "Responsible",      "Which do you find more `Responsible', the left or the right?",
+  "A9",     "Simple",    "Which do you find more `Simple', the left or the right?",
+  "A10",     "Gentle",   "Which do you find more `Gentle', the left or the right?"
+)
+
 # 2) Experiment settings
-APP_TITLE <- paste0("Paired Comparison Experiment \n (Which is more `", ATTR_LABEL ,"'?)")
+APP_TITLE <- paste0("Paired Comparison Experiment")
 INSTRUCTION_TEXT <- paste(
   ATTR_INSTR,
   "Choose based on your intuition.",
@@ -63,21 +79,29 @@ N_REPS <- 1
 ALLOW_SKIP <- FALSE  # if TRUE, shows a 'スキップ' button
 
 # ===== Utility: make full trial list =====
-make_trials <- function(items, n_reps = 1, seed = NULL) {
+make_trials <- function(items, attrs, n_reps = 1, seed = NULL) {
   if (!is.null(seed)) set.seed(seed)
-  ids <- items$item_id
-  pairs <- t(combn(ids, 2)) %>% as.data.frame() %>% setNames(c("i1","i2"))
-  trials <- map_dfr(seq_len(n_reps), function(rep_i){
-    pairs %>% mutate(rep = rep_i)
+  ids   <- items$item_id
+  pairs <- t(combn(ids, 2)) |> as.data.frame() |> setNames(c("i1","i2"))
+  
+  # attrs の並び順 = ブロック順（必要ならここで sample(attrs$attr_id) に）
+  trials_list <- purrr::imap(attrs$attr_id, function(aid, idx){
+    row  <- attrs |> dplyr::filter(attr_id == aid) |> dplyr::slice(1)
+    reps <- tibble::tibble(rep = seq_len(n_reps))
+    reps |>
+      tidyr::crossing(pairs) |>
+      dplyr::mutate(lr_flip = sample(c(TRUE,FALSE), dplyr::n(), TRUE),
+                    left = ifelse(lr_flip, i1, i2),
+                    right= ifelse(lr_flip, i2, i1)) |>
+      dplyr::select(rep,left,right) |>
+      dplyr::slice_sample(prop = 1) |>            # ブロック内だけシャッフル
+      dplyr::mutate(attr_id=row$attr_id,
+                    attr_label=row$label,
+                    instruction=row$instruction,
+                    block_index = idx)
   })
-  # Randomize left/right assignment per trial
-  lr_flip <- sample(c(TRUE, FALSE), nrow(trials), replace = TRUE)
-  trials <- trials %>% mutate(
-    left  = ifelse(lr_flip, i1, i2),
-    right = ifelse(lr_flip, i2, i1)
-  )
-  # Shuffle trial order
-  trials <- trials %>% slice_sample(prop = 1)
+  
+  trials <- dplyr::bind_rows(trials_list) |> dplyr::arrange(block_index)
   trials$trial_index <- seq_len(nrow(trials))
   trials
 }
@@ -107,7 +131,8 @@ ui <- fluidPage(
 #      numericInput("n_reps", "反復回数 (各ペアの提示回数)", value = N_REPS, min = 1, step = 1),
       hr(),
       strong("Description"),
-      tags$pre(INSTRUCTION_TEXT),
+#     tags$pre(INSTRUCTION_TEXT), 
+      uiOutput("instruction_text"),        
       hr(),
       uiOutput("status_text"),
     ),
@@ -119,8 +144,8 @@ ui <- fluidPage(
       align = "center",
       condition = "output.is_finished == true",
       actionButton("send_data", "send the data"),
-      br(), br(),
-      actionButton("restart", "restart from first")
+#      br(), br(),
+#      actionButton("restart", "restart from first")
     )
   )
 )
@@ -147,11 +172,13 @@ server <- function(input, output, session){
   
   # ---- Initialize experiment (do not touch input$... directly here) ----
   init_exp <- function(n_reps, seed){
-    rv$trials <- make_trials(items_tbl, n_reps = 1, seed = 0)
-    rv$idx <- 0L
+    rv$trials  <- make_trials(items_tbl, attrs_tbl, n_reps = 1, seed = 0)
+    rv$idx     <- 1L            # 1本目を指しておく
     rv$records <- tibble()
-    go_next()
+    rv$paused  <- TRUE          # 最初は「ブロック開始待ち」
+    rv$start_time <- NULL       # 計測は開始ボタン押下から
   }
+  
   
   # Move to next trial
   go_next <- function(){
@@ -166,14 +193,23 @@ server <- function(input, output, session){
     rv$trials %>% slice(rv$idx)
   })
   
+  # Instruction
+  output$instruction_text <- renderUI({
+    tr <- cur_trial()
+    if (is.null(tr)) return(NULL)
+    div(HTML(tr$instruction))
+  })
+  
   # Status
   output$status_text <- renderUI({
     req(rv$trials)
     total <- nrow(rv$trials)
-    cur <- min(rv$idx, total)
+    cur   <- min(rv$idx, total)
+    cur_attr <- tryCatch({ cur_trial()$attr_label }, error = function(e) NA)
     tagList(
       div(sprintf("progress: %d / %d", cur, total)),
-      tags$progress(value = cur, max = total, style = "width:100%")
+      tags$progress(value = cur, max = total, style = "width:100%"),
+#      if (!is.na(cur_attr)) div(HTML(sprintf("<b>Evaluation Item:</b> %s", cur_attr)))
     )
   })
   
@@ -186,6 +222,14 @@ server <- function(input, output, session){
       ))
     }
     tr <- cur_trial(); req(tr)
+    if (isTRUE(rv$paused)) {
+      return(tagList(
+        h3(sprintf("Next Evaluation Item: %s", tr$attr_label)),
+        p("Press the button below to get started."),
+        div(style="text-align:center;",
+            actionButton("start_block", "Start this session"))
+      ))
+    }
     left  <- items_tbl %>% filter(item_id == tr$left)
     right <- items_tbl %>% filter(item_id == tr$right)
     
@@ -202,21 +246,24 @@ server <- function(input, output, session){
       )
     }
       
-     
-    fluidRow(
-      column(6,
-             item_card(left),
-             div(style = "text-align:center; margin-top:10px;",
-                 actionButton("choose_left", paste0("<- This is more ", ATTR_LABEL))
-             )
-      ),
-      column(6,
-             item_card(right),
-             div(style = "text-align:center; margin-top:10px;",
-                 actionButton("choose_right", paste0("This is more ", ATTR_LABEL, " ->"))
-             )
+    tagList(
+      h3(sprintf("Evaluation Item: %s", tr$attr_label)),
+      fluidRow(
+        column(6,
+               item_card(left),
+               div(style = "text-align:center; margin-top:10px;",
+                   actionButton("choose_left", paste0("<- This is more ", tr$attr_label))
+               )
+        ),
+        column(6,
+               item_card(right),
+               div(style = "text-align:center; margin-top:10px;",
+                   actionButton("choose_right", paste0("This is more ", tr$attr_label, " ->"))
+               )
+        )       # ← ここに既存の column(6, ...) ×2 をそのまま
       )
     )
+    
   })
   
   # Record a response
@@ -233,8 +280,8 @@ server <- function(input, output, session){
       participant_id = input$participant_id,
       trial_index = tr$trial_index,
       rep = tr$rep,
-      attr_id = ATTR_ID,           
-      attr_label = ATTR_LABEL,     
+      attr_id = tr$attr_id,         # ← 追加
+      attr_label = tr$attr_label,   # ← 追加 
       item_left = tr$left,
       item_right = tr$right,
       choice = chosen,
@@ -246,12 +293,24 @@ server <- function(input, output, session){
     )
     rv$records <- bind_rows(rv$records, row)
     
-    # Next trial or finish
-    if (rv$idx >= nrow(rv$trials)){
+    # 次へ or 終了
+    if (rv$idx >= nrow(rv$trials)) {
       rv$idx <- nrow(rv$trials) + 1L
     } else {
-      go_next()
+      # 次が新しいブロックなら休憩へ、同一ブロックなら即次試行
+      next_tr <- rv$trials |> dplyr::slice(rv$idx + 1L)
+      cur_block <- tr$block_index
+      if (BREAK_BETWEEN_BLOCKS && !is.null(next_tr$block_index) &&
+          next_tr$block_index != cur_block) {
+        rv$idx <- rv$idx + 1L
+        rv$paused <- TRUE
+        rv$start_time <- NULL
+      } else {
+        rv$idx <- rv$idx + 1L
+        rv$start_time <- Sys.time()
+      }
     }
+
   }
   
   observeEvent(input$choose_left,  ignoreInit = TRUE, { record_choice("left")  })
@@ -310,6 +369,22 @@ server <- function(input, output, session){
   observeEvent(TRUE, {
     init_exp(isolate(input$n_reps), isolate(input$seed))
   }, once = TRUE)
+  
+  # ステップ間フラグ
+  rv <- reactiveValues(
+    trials = NULL,
+    idx = 0L,
+    start_time = NULL,
+    records = tibble(),
+    paused = TRUE   # ← 追加：休憩（開始待ち）状態
+  )
+  
+  # 開始ボタンのハンドラ
+  observeEvent(input$start_block, {
+    rv$paused <- FALSE
+    rv$start_time <- Sys.time()
+  })
+  
 }
 
 shinyApp(ui, server)

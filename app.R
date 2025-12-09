@@ -13,6 +13,7 @@ suppressPackageStartupMessages({
   library(stringr)
   library(later)
   library(rsconnect)
+  library(googlesheets4)
 })
 
 # google setup
@@ -24,6 +25,17 @@ drive_auth(
 
 
 DRIVE_FOLDER_ID <- "1Vu0mGWF7EDFpUh1Zt3lIUdwu_HBJ_rQw"  # 例: '1AbCdEfGhijkLMNO
+
+GSHEET_ID <- "1G5Ho9FsUHj11WzvERqd6lMoO6qUeLwZ6gc6nWJdyZP0"
+
+append_row_safe <- function(row_df){
+  tryCatch({
+    googlesheets4::sheet_append(GSHEET_ID, row_df)
+    TRUE
+  }, error = function(e){ FALSE })
+}
+
+
 
 # ===== User-configurable items =====
 # 1) Define the set of items to be compared.
@@ -126,7 +138,7 @@ ui <- fluidPage(
   fluidRow(
     column(12,
       align = "center",
-      textInput("participant_id", "Your ID", value = "Input your ID"),
+      textInput("participant_id", "Your ID", value = ""),
 #      numericInput("seed", "乱数シード (再現用)", value = 2025, step = 1),
 #      numericInput("n_reps", "反復回数 (各ペアの提示回数)", value = N_REPS, min = 1, step = 1),
       hr(),
@@ -150,14 +162,19 @@ ui <- fluidPage(
   )
 )
 
+
 # ===== Server =====
+enableBookmarking("url")
+
 server <- function(input, output, session){
   # Reactive state
+  session$allowReconnect(TRUE)
   rv <- reactiveValues(
     trials = NULL,
     idx = 0L,
     start_time = NULL,
-    records = tibble()
+    records = tibble(),
+    paused = TRUE   # ← 最初からここに含める
   )
   
   # ---- Helper: finished flag as a reactive (server-side use) ----
@@ -173,11 +190,83 @@ server <- function(input, output, session){
   # ---- Initialize experiment (do not touch input$... directly here) ----
   init_exp <- function(n_reps, seed){
     rv$trials  <- make_trials(items_tbl, attrs_tbl, n_reps = 1, seed = 0)
-    rv$idx     <- 1L            # 1本目を指しておく
+    rv$idx     <- 1L
     rv$records <- tibble()
-    rv$paused  <- TRUE          # 最初は「ブロック開始待ち」
-    rv$start_time <- NULL       # 計測は開始ボタン押下から
+    rv$paused  <- TRUE
+    rv$start_time <- NULL
   }
+  
+  # 最初に一度だけ初期化
+  observeEvent(TRUE, {
+    init_exp(1, 0)
+  }, once = TRUE)
+  
+  
+  # Sheetsから進捗を読む関数（列が無い場合でも落ちない）
+  load_progress <- function(pid){
+    df <- tryCatch(
+      googlesheets4::read_sheet(GSHEET_ID, .name_repair = "unique"),
+      error = function(e) tibble()
+    )
+    if (!nrow(df)) return(tibble())
+    if (!"participant_id" %in% names(df)) return(tibble())   # 列が無ければ空で返す
+    
+    df %>%
+      dplyr::filter(.data$participant_id == pid) %>%
+      dplyr::transmute(
+        attr_id,
+        left  = item_left,
+        right = item_right,
+        rep   = dplyr::coalesce(as.integer(rep), 1L)
+      ) %>%
+      dplyr::distinct(attr_id, left, right, rep)
+  }
+  
+  
+  # IDが入力されたら一度だけ復元実行（手動で変更したら再実行）
+  observeEvent(input$participant_id, {
+    pid <- input$participant_id
+    req(!is.null(pid), nzchar(pid))         # 空のときはスキップ
+    req(!is.null(rv$trials), nrow(rv$trials) > 0)
+    
+    done <- load_progress(pid)
+    
+    if (nrow(done) > 0) {
+      key <- rv$trials %>%
+        dplyr::select(attr_id, left, right, rep, trial_index, block_index) %>%
+        dplyr::mutate(rep = as.integer(rep))
+      
+      remain <- dplyr::anti_join(
+        key, done,
+        by = c("attr_id","left"="left","right"="right","rep"="rep")
+      )
+      
+      if (nrow(remain) > 0) {
+        next_idx <- min(remain$trial_index)
+        rv$idx <- next_idx
+        
+        # ブロック先頭ならポーズ、それ以外はすぐ再開
+        cur_blk  <- key$block_index[key$trial_index == next_idx]
+        prev_blk <- key$block_index[key$trial_index == (next_idx - 1)]
+        if (is.na(prev_blk) || (!is.na(cur_blk) && cur_blk != prev_blk)) {
+          rv$paused <- TRUE
+          rv$start_time <- NULL
+        } else {
+          rv$paused <- FALSE
+          rv$start_time <- Sys.time()
+        }
+      } else {
+        rv$idx <- nrow(rv$trials) + 1L  # 完了
+        rv$paused <- FALSE
+        rv$start_time <- NULL
+      }
+    } else {
+      # 進捗なし：通常開始
+      rv$idx <- 1L
+      rv$paused <- TRUE
+      rv$start_time <- NULL
+    }
+  }, ignoreInit = FALSE)
   
   
   # Move to next trial
@@ -310,6 +399,10 @@ server <- function(input, output, session){
         rv$start_time <- Sys.time()
       }
     }
+    
+    # 選択結果を送信
+    ok <- append_row_safe(row)
+    
 
   }
   
@@ -331,12 +424,10 @@ server <- function(input, output, session){
     
     # 進行表示つきでDriveへアップロード
     withProgress(message = "Sending...", value = 0, {
-      incProgress(0.3)
-      folder <- googledrive::drive_get(googledrive::as_id(DRIVE_FOLDER_ID))
       incProgress(0.6)
       googledrive::drive_upload(
         media = tmpfile,
-        path  = folder,
+        path  = googledrive::as_id(DRIVE_FOLDER_ID),  # ← ここ
         name  = fname,
         overwrite = FALSE
       )
@@ -370,15 +461,7 @@ server <- function(input, output, session){
     init_exp(isolate(input$n_reps), isolate(input$seed))
   }, once = TRUE)
   
-  # ステップ間フラグ
-  rv <- reactiveValues(
-    trials = NULL,
-    idx = 0L,
-    start_time = NULL,
-    records = tibble(),
-    paused = TRUE   # ← 追加：休憩（開始待ち）状態
-  )
-  
+
   # 開始ボタンのハンドラ
   observeEvent(input$start_block, {
     rv$paused <- FALSE
